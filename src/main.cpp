@@ -1,3 +1,14 @@
+/*
+ * Kultivate Greenhouse Control Firmware
+ * ESP32 with Firebase Integration
+ * Supports Normal Mode and Simulation Mode
+ *
+ * Changes:
+ *  - Replaced ambiguous String '+' usage with concat() via buildPath()
+ *  - Removed anonymous Firebase sign-up flow (no auth required)
+ *  - signupOK set true after Firebase.begin()
+ */
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
@@ -12,518 +23,540 @@
 // Firebase credentials (no authentication required)
 #define API_KEY       "AIzaSyDN3eUAOAWhFBsrez4UrgtEKjfAAv57Y3g"
 #define DATABASE_URL  "https://evidence-3abac-default-rtdb.firebaseio.com/"
+#define DATABASE_ST   "jas65T0JYHiger39Z9jcWpIVELnmPF4MUnWf7xTX"
 
-// Pin definitions
+
+// Sensor Pins
 #define DHT_PIN 4
+#define DHT_TYPE DHT22
 #define DHT_PIN_2 15
 #define SOIL_MOISTURE_PIN 35
 #define GAS_SENSOR_PIN 34
-#define FAN_PIN 32 
-#define Fan_Pin_2 27
-#define PUMP_PIN 16 
+#define LIGHT_SENSOR_PIN 32
 
-// #define HEATER_PIN 15 //27
-// #define MISTING_PIN 14
-// #define LIGHTING_PIN 12
-// #define CO2_DOSING_PIN 13
+// Actuator Pins
+#define FAN_PIN 32
+#define FAN_PIN_2 27
+#define PUMP_PIN 16
+#define HEATER_PIN 27
+#define MISTING_PIN 14
+#define LIGHTING_PIN 12
+#define CO2_DOSING_PIN 13
 
-// Sensor configuration
-#define DHT_TYPE DHT22
-DHT dht(DHT_PIN, DHT_TYPE);
-DHT dht_2(DHT_PIN_2, DHT_TYPE);
+// LED Indicator
+#define STATUS_LED 2
 
-// Firebase objects (v4.4.17 compatible)
+// Zone ID - Configure for each greenhouse
+#define ZONE_ID "greenhouse_1"
+
+// Timing
+#define SENSOR_READ_INTERVAL 5000    // 5 seconds
+#define FIREBASE_UPDATE_INTERVAL 10000  // 10 seconds
+#define SIMULATION_CHECK_INTERVAL 1000  // 1 second
+
+// Firebase objects
 FirebaseData fbdo;
-FirebaseAuth auth;
+FirebaseAuth auth;      // kept for compatibility with Firebase.begin signature
 FirebaseConfig config;
 
-// Zone ID (configure per greenhouse)
-const char* zoneId = "zone-1";
+// Sensor objects
+DHT dht(DHT_PIN, DHT_TYPE);
 
-// Firebase paths
-String sensorsPath;
-String simulationPath;
-String actuatorsPath;
+// System state
+enum SystemMode {
+  NORMAL_MODE,
+  SIMULATION_MODE
+};
 
-// Data structures
+SystemMode currentMode = NORMAL_MODE;
+bool signupOK = false;
+
+// Sensor readings
 struct SensorData {
   float temperature;
   float humidity;
-  int soilMoisture;
-  int gasLevel;
-  unsigned long lastUpdate;
-} sensorData;
+  float soilMoisture;
+  float gasLevel;
+  float lightLevel;
+};
 
+SensorData currentSensors = {0, 0, 0, 0, 0};
+
+// Normal mode parameters
+struct NormalModeParams {
+  float targetTempMin = 22.0;
+  float targetTempMax = 28.0;
+  float targetHumidityMin = 60.0;
+  float targetHumidityMax = 80.0;
+  float targetSoilMoistureMin = 40.0;
+  float targetSoilMoistureMax = 70.0;
+  float targetGasLevelMin = 400.0;
+  float targetLightLevelMin = 200.0;
+};
+
+NormalModeParams normalParams;
+
+// Actuator states
+struct ActuatorStates {
+  bool fan = false;
+  bool pump = false;
+  bool heater = false;
+  bool misting = false;
+  bool lighting = false;
+  bool co2dosing = false;
+};
+
+ActuatorStates currentActuators;
+
+// Simulation data
 struct SimulationData {
-  bool active;
-  String type;
-  unsigned long startTime;
-  int duration;
-  String status;
-} simulationData;
+  bool active = false;
+  String type = "none";
+  unsigned long startTime = 0;
+  int duration = 10;
+  float simTemp = 0;
+  float simHumidity = 0;
+  float simSoilMoisture = 0;
+  float simGasLevel = 0;
+  float simLightLevel = 0;
+};
 
-struct ActuatorData {
-  bool fan;
-  bool pump;
-  bool heater;
-  bool misting;
-  bool lighting;
-  bool co2dosing;
-} actuatorData;
+SimulationData simulationState;
 
 // Timing variables
 unsigned long lastSensorRead = 0;
 unsigned long lastFirebaseUpdate = 0;
 unsigned long lastSimulationCheck = 0;
-const unsigned long SENSOR_READ_INTERVAL = 2000;    // 2 seconds
-const unsigned long FIREBASE_UPDATE_INTERVAL = 3000; // 3 seconds
-const unsigned long SIMULATION_CHECK_INTERVAL = 500; // 500ms
 
-// Firebase connection flag
-bool firebaseReady = false;
-
-// Function declarations
+// Function prototypes
 void setupWiFi();
 void setupFirebase();
+void setupSensors();
+void setupActuators();
 void readSensors();
 void updateFirebaseSensors();
-void listenToSimulation();
-void listenToActuators();
-void controlActuators();
-void handleSimulation();
-void initializeFirebasePaths();
-void buildPaths();
+void checkModeChange();
+void runNormalMode();
+void runSimulationMode();
+void controlActuators(ActuatorStates states);
+void updateFirebaseActuators(ActuatorStates states, bool isSimulation);
+ActuatorStates calculateNormalModeActuators();
+ActuatorStates calculateSimulationActuators();
+float readSoilMoisture();
+float readGasLevel();
+float readLightLevel();
+
+// Helper: safe path builder using concat()
+String buildPath(const char* p1, const char* p2 = nullptr, const char* p3 = nullptr, const char* p4 = nullptr) {
+  String path;
+  path.reserve(128);
+  if (p1) path.concat(p1);
+  if (p2) path.concat(p2);
+  if (p3) path.concat(p3);
+  if (p4) path.concat(p4);
+  return path;
+}
 
 void setup() {
   Serial.begin(9600);
-  delay(1000);
+  Serial.println("Kultivate Greenhouse Control Starting...");
   
-  Serial.println("\n\n");
-  Serial.println("========================================");
-  Serial.println("  Kultivate Greenhouse Control System  ");
-  Serial.println("      Firebase v4.4.17 Edition         ");
-  Serial.println("========================================");
+  pinMode(STATUS_LED, OUTPUT);
   
-  // Initialize pins
-  pinMode(FAN_PIN, OUTPUT);
-  pinMode(Fan_Pin_2, OUTPUT);
-  pinMode(PUMP_PIN, OUTPUT);
-  
-  // Initialize all actuators to OFF
-  digitalWrite(FAN_PIN, HIGH);
-  digitalWrite(Fan_Pin_2, HIGH);
-  digitalWrite(PUMP_PIN, HIGH);
-  
-  Serial.println("Actuator pins initialized");
-  
-  // Initialize sensors
-  dht.begin();
-  dht_2.begin();
-  Serial.println("DHT22 sensor initialized");
-  
-  // Build Firebase paths
-  buildPaths();
-  
-  // Connect to WiFi
   setupWiFi();
-  
-  // Setup Firebase
   setupFirebase();
+  setupSensors();
+  setupActuators();
   
-  // Initialize Firebase paths
-  initializeFirebasePaths();
-  
-  // Initialize simulation data
-  simulationData.active = false;
-  simulationData.type = "none";
-  simulationData.startTime = 0;
-  simulationData.duration = 10000;
-  simulationData.status = "idle";
-  
-  Serial.println("\nSystem initialized successfully");
-  Serial.println("Ready to receive commands\n");
+  Serial.println("System ready!");
+  digitalWrite(STATUS_LED, HIGH);
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   
-  // Check if Firebase is ready
-  if (!firebaseReady) {
-    delay(1000);
-    return;
-  }
-  
   // Read sensors periodically
   if (currentMillis - lastSensorRead >= SENSOR_READ_INTERVAL) {
-    readSensors();
     lastSensorRead = currentMillis;
-  }
-  
-  // Update Firebase periodically
-  if (currentMillis - lastFirebaseUpdate >= FIREBASE_UPDATE_INTERVAL) {
+    readSensors();
     updateFirebaseSensors();
-    lastFirebaseUpdate = currentMillis;
   }
   
-  // Check simulation status periodically
+  // Check for mode changes
   if (currentMillis - lastSimulationCheck >= SIMULATION_CHECK_INTERVAL) {
-    listenToSimulation();
-    listenToActuators();
     lastSimulationCheck = currentMillis;
+    checkModeChange();
   }
   
-  // Handle simulation logic
-  handleSimulation();
-  
-  // Control actuators
-  controlActuators();
-  
-  delay(100);
-}
-
-void buildPaths() {
-  // Build paths without using + operator
-  sensorsPath = "/greenhouses/";
-  sensorsPath.concat(zoneId);
-  sensorsPath.concat("/sensors");
-  
-  simulationPath = "/greenhouses/";
-  simulationPath.concat(zoneId);
-  simulationPath.concat("/simulation");
-  
-  actuatorsPath = "/greenhouses/";
-  actuatorsPath.concat(zoneId);
-  actuatorsPath.concat("/actuators");
-  
-  Serial.println("Firebase paths configured:");
-  Serial.print("  Sensors: ");
-  Serial.println(sensorsPath);
-  Serial.print("  Simulation: ");
-  Serial.println(simulationPath);
-  Serial.print("  Actuators: ");
-  Serial.println(actuatorsPath);
+  // Run appropriate mode logic
+  if (currentMode == NORMAL_MODE) {
+    runNormalMode();
+  } else if (currentMode == SIMULATION_MODE) {
+    runSimulationMode();
+  }
 }
 
 void setupWiFi() {
   Serial.print("Connecting to WiFi");
-  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-    attempts++;
   }
   
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nWiFi connection failed!");
-    Serial.println("Restarting in 5 seconds...");
-    delay(5000);
-    ESP.restart();
-  }
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
 void setupFirebase() {
-  Serial.println("\nInitializing Firebase...");
-  
-  // Assign the RTDB URL (no authentication needed)
   config.database_url = DATABASE_URL;
-  
-  // Disable authentication tokens
-  config.signer.tokens.legacy_token = "jas65T0JYHiger39Z9jcWpIVELnmPF4MUnWf7xTX";
-  
-  // Initialize Firebase without authentication
-  Firebase.begin(&config, &auth);
-  
-  // Enable auto reconnection
+  config.signer.tokens.legacy_token = DATABASE_ST; // ✅ Add this line
+
+  Firebase.begin(&config, nullptr);
   Firebase.reconnectWiFi(true);
+  signupOK = true;
+
+  String path;
+  path.concat("greenhouses/");
+  path.concat(ZONE_ID);
+  path.concat("/mode");
   
-  // Set database read timeout
-  fbdo.setResponseSize(4096);
-  
-  // Wait for Firebase to be ready
-  Serial.print("Waiting for Firebase connection");
-  int attempts = 0;
-  while (!Firebase.ready() && attempts < 30) {
-    Serial.print(".");
-    delay(500);
-    attempts++;
-  }
-  
-  if (Firebase.ready()) {
-    firebaseReady = true;
-    Serial.println("\nFirebase connected successfully");
-    Serial.println("No authentication required");
+  if (Firebase.RTDB.setString(&fbdo, path.c_str(), "normal")) {
+    Serial.println("Firebase write successful!");
   } else {
-    Serial.println("\nFirebase connection failed!");
-    Serial.println("Check your DATABASE_URL");
+    Serial.printf("Firebase write failed: %s\n", fbdo.errorReason().c_str());
   }
 }
 
-void initializeFirebasePaths() {
-  Serial.println("\nInitializing database structure...");
+
+void setupSensors() {
+  dht.begin();
+  pinMode(SOIL_MOISTURE_PIN, INPUT);
+  pinMode(GAS_SENSOR_PIN, INPUT);
+  pinMode(LIGHT_SENSOR_PIN, INPUT);
   
-  // Initialize sensor structure
-  FirebaseJson sensorJson;
-  sensorJson.set("temperature", 0);
-  sensorJson.set("humidity", 0);
-  sensorJson.set("soilMoisture", 0);
-  sensorJson.set("gasLevel", 0);
-  sensorJson.set("lastUpdate", (int)millis());
+  Serial.println("Sensors initialized");
+}
+
+void setupActuators() {
+  pinMode(FAN_PIN, OUTPUT);
+  pinMode(FAN_PIN_2, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(HEATER_PIN, OUTPUT);
+  pinMode(MISTING_PIN, OUTPUT);
+  pinMode(LIGHTING_PIN, OUTPUT);
+  pinMode(CO2_DOSING_PIN, OUTPUT);
   
-  if (Firebase.RTDB.setJSON(&fbdo, sensorsPath.c_str(), &sensorJson)) {
-    Serial.println("Sensors structure initialized");
-  }
+  // Start with all actuators off
+  digitalWrite(FAN_PIN, HIGH ); // Assuming active LOW for fan
+  digitalWrite(FAN_PIN_2, HIGH ); // Assuming active LOW for fan
+  digitalWrite(PUMP_PIN, HIGH); // Assuming active LOW for pump
+  digitalWrite(HEATER_PIN, LOW);
+  digitalWrite(MISTING_PIN, LOW);
+  digitalWrite(LIGHTING_PIN, LOW);
+  digitalWrite(CO2_DOSING_PIN, LOW);
   
-  // Initialize simulation structure
-  FirebaseJson simJson;
-  simJson.set("active", false);
-  simJson.set("type", "none");
-  simJson.set("startTime", 0);
-  simJson.set("duration", 10000);
-  simJson.set("status", "idle");
-  
-  if (Firebase.RTDB.setJSON(&fbdo, simulationPath.c_str(), &simJson)) {
-    Serial.println("Simulation structure initialized");
-  }
-  
-  // Initialize actuators structure
-  FirebaseJson actuatorJson;
-  actuatorJson.set("fan", false);
-  actuatorJson.set("pump", false);
-  actuatorJson.set("heater", false);
-  actuatorJson.set("misting", false);
-  actuatorJson.set("lighting", false);
-  actuatorJson.set("co2dosing", false);
-  
-  if (Firebase.RTDB.setJSON(&fbdo, actuatorsPath.c_str(), &actuatorJson)) {
-    Serial.println("Actuators structure initialized");
-  }
-  
-  Serial.println("Database structure ready\n");
+  Serial.println("Actuators initialized");
 }
 
 void readSensors() {
-  // Read temperature and humidity from DHT22
-  sensorData.temperature = (dht.readTemperature() + dht_2.readTemperature()) / 2;
-  sensorData.humidity = (dht.readHumidity() + dht_2.readHumidity()) / 2;
+  currentSensors.temperature = dht.readTemperature();
+  currentSensors.humidity = dht.readHumidity();
+  currentSensors.soilMoisture = readSoilMoisture();
+  currentSensors.gasLevel = readGasLevel();
+  currentSensors.lightLevel = readLightLevel();
   
-  // Check for reading errors
-  if (isnan(sensorData.temperature)) {
-    sensorData.temperature = 0;
-  }
-  if (isnan(sensorData.humidity)) {
-    sensorData.humidity = 0;
-  }
+  // Validate readings
+  if (isnan(currentSensors.temperature)) currentSensors.temperature = 0;
+  if (isnan(currentSensors.humidity)) currentSensors.humidity = 0;
   
-  // Read soil moisture (0-4095 analog value, convert to percentage)
-  int soilRaw = analogRead(SOIL_MOISTURE_PIN);
-  sensorData.soilMoisture = map(soilRaw, 4095, 0, 0, 100);
-  sensorData.soilMoisture = constrain(sensorData.soilMoisture, 0, 100);
-  
-  // Read gas sensor (approximate CO2 ppm)
-  int gasRaw = analogRead(GAS_SENSOR_PIN);
-  sensorData.gasLevel = map(gasRaw, 0, 4095, 300, 1000);
-  sensorData.gasLevel = constrain(sensorData.gasLevel, 300, 1000);
-  
-  sensorData.lastUpdate = millis();
-  
-  // Print sensor readings
-  Serial.println("--- Sensor Readings ---");
-  Serial.print("Temperature:   ");
-  Serial.print(sensorData.temperature);
-  Serial.println(" C");
-  Serial.print("Humidity:      ");
-  Serial.print(sensorData.humidity);
-  Serial.println(" %");
-  Serial.print("Soil Moisture: ");
-  Serial.print(sensorData.soilMoisture);
-  Serial.println(" %");
-  Serial.print("Gas Level:     ");
-  Serial.print(sensorData.gasLevel);
-  Serial.println(" ppm");
-  Serial.println();
+  Serial.printf("Sensors - Temp: %.1f°C, Humidity: %.1f%%, Soil: %.1f%%, Gas: %.1f ppm, Light: %.1f lux\n",
+                currentSensors.temperature, currentSensors.humidity, 
+                currentSensors.soilMoisture, currentSensors.gasLevel,
+                currentSensors.lightLevel);
+}
+
+float readSoilMoisture() {
+  int rawValue = analogRead(SOIL_MOISTURE_PIN);
+  // Convert to percentage (calibrate these values for your sensor)
+  float moisture = map(rawValue, 4095, 0, 0, 100);
+  return constrain(moisture, 0, 100);
+}
+
+float readGasLevel() {
+  int rawValue = analogRead(GAS_SENSOR_PIN);
+  // Convert to CO2 ppm (calibrate for your sensor)
+  float gasLevel = map(rawValue, 0, 4095, 300, 2000);
+  return gasLevel;
+}
+
+float readLightLevel() {
+  int rawValue = analogRead(LIGHT_SENSOR_PIN);
+  // Convert to lux (calibrate for your sensor)
+  float lightLevel = map(rawValue, 0, 4095, 0, 1000);
+  return lightLevel;
 }
 
 void updateFirebaseSensors() {
-  if (!firebaseReady) return;
+  if (Firebase.ready() && signupOK) {
+    String path = buildPath("greenhouses/", ZONE_ID, "/sensors");
+    
+    FirebaseJson json;
+    json.set("temperature", currentSensors.temperature);
+    json.set("humidity", currentSensors.humidity);
+    json.set("soilMoisture", currentSensors.soilMoisture);
+    json.set("gasLevel", currentSensors.gasLevel);
+    json.set("lightLevel", currentSensors.lightLevel);
+    json.set("lastUpdate", (long)millis());
+    
+    Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json);
+  }
+}
+
+void checkModeChange() {
+  if (Firebase.ready() && signupOK) {
+    String path = buildPath("greenhouses/", ZONE_ID, "/mode");
+    
+    if (Firebase.RTDB.getString(&fbdo, path.c_str())) {
+      String mode = fbdo.stringData();
+      
+      if (mode == "simulation" && currentMode == NORMAL_MODE) {
+        Serial.println("Switching to SIMULATION MODE");
+        currentMode = SIMULATION_MODE;
+        
+        // Load simulation parameters
+        path = buildPath("greenhouses/", ZONE_ID, "/simulation");
+        if (Firebase.RTDB.getJSON(&fbdo, path.c_str())) {
+          FirebaseJson &json = fbdo.jsonObject();
+          FirebaseJsonData result;
+          
+          json.get(result, "type");
+          simulationState.type = result.stringValue;
+          
+          json.get(result, "duration");
+          simulationState.duration = result.intValue;
+          
+          json.get(result, "conditions/temperature");
+          simulationState.simTemp = result.floatValue;
+          
+          json.get(result, "conditions/humidity");
+          simulationState.simHumidity = result.floatValue;
+          
+          json.get(result, "conditions/soilMoisture");
+          simulationState.simSoilMoisture = result.floatValue;
+          
+          json.get(result, "conditions/gasLevel");
+          simulationState.simGasLevel = result.floatValue;
+          
+          json.get(result, "conditions/lightLevel");
+          simulationState.simLightLevel = result.floatValue;
+          
+          simulationState.active = true;
+          simulationState.startTime = millis();
+          
+          Serial.printf("Simulation loaded: %s for %d seconds\n", 
+                       simulationState.type.c_str(), simulationState.duration);
+        }
+      } else if (mode == "normal" && currentMode == SIMULATION_MODE) {
+        Serial.println("Switching to NORMAL MODE");
+        currentMode = NORMAL_MODE;
+        simulationState.active = false;
+      }
+    }
+  }
+}
+
+void runNormalMode() {
+  // Calculate actuator states based on sensor readings
+  ActuatorStates newStates = calculateNormalModeActuators();
   
-  FirebaseJson json;
-  json.set("temperature", sensorData.temperature);
-  json.set("humidity", sensorData.humidity);
-  json.set("soilMoisture", sensorData.soilMoisture);
-  json.set("gasLevel", sensorData.gasLevel);
-  json.set("lastUpdate", (int)sensorData.lastUpdate);
+  // Only update if states changed
+  if (memcmp(&newStates, &currentActuators, sizeof(ActuatorStates)) != 0) {
+    currentActuators = newStates;
+    controlActuators(currentActuators);
+    updateFirebaseActuators(currentActuators, false);
+  }
+}
+
+ActuatorStates calculateNormalModeActuators() {
+  ActuatorStates states;
   
-  if (Firebase.RTDB.updateNode(&fbdo, sensorsPath.c_str(), &json)) {
-    Serial.println("Sensors updated to Firebase");
+  // Fan control (cooling/ventilation)
+  if (currentSensors.temperature > normalParams.targetTempMax) {
+    states.fan = true;
+  } else if (currentSensors.temperature < normalParams.targetTempMin) {
+    states.fan = false;
   } else {
-    Serial.println("Failed to update sensors");
-    Serial.print("Error: ");
-    Serial.println(fbdo.errorReason());
+    states.fan = currentActuators.fan; // Maintain current state
   }
+  
+  // Heater control
+  if (currentSensors.temperature < normalParams.targetTempMin) {
+    states.heater = true;
+  } else if (currentSensors.temperature > normalParams.targetTempMin + 2) {
+    states.heater = false;
+  } else {
+    states.heater = currentActuators.heater;
+  }
+  
+  // Irrigation pump (for soil moisture)
+  if (currentSensors.soilMoisture < normalParams.targetSoilMoistureMin) {
+    states.pump = true;
+  } else if (currentSensors.soilMoisture > normalParams.targetSoilMoistureMax) {
+    states.pump = false;
+  } else {
+    states.pump = currentActuators.pump;
+  }
+  
+  // Misting system (for humidity)
+  if (currentSensors.humidity < normalParams.targetHumidityMin) {
+    states.misting = true;
+  } else if (currentSensors.humidity > normalParams.targetHumidityMax) {
+    states.misting = false;
+  } else {
+    states.misting = currentActuators.misting;
+  }
+  
+  // Lighting control
+  if (currentSensors.lightLevel < normalParams.targetLightLevelMin) {
+    states.lighting = true;
+  } else {
+    states.lighting = false;
+  }
+  
+  // CO2 dosing
+  if (currentSensors.gasLevel < normalParams.targetGasLevelMin) {
+    states.co2dosing = true;
+  } else {
+    states.co2dosing = false;
+  }
+  
+  return states;
 }
 
-void listenToSimulation() {
-  if (!firebaseReady) return;
+void runSimulationMode() {
+  if (!simulationState.active) return;
   
-  if (Firebase.RTDB.getJSON(&fbdo, simulationPath.c_str())) {
-    FirebaseJson &json = fbdo.jsonObject();
-    FirebaseJsonData jsonData;
-    
-    // Parse simulation data
-    if (json.get(jsonData, "active")) {
-      simulationData.active = jsonData.boolValue;
-    }
-    
-    if (json.get(jsonData, "type")) {
-      simulationData.type = jsonData.stringValue;
-    }
-    
-    if (json.get(jsonData, "startTime")) {
-      simulationData.startTime = jsonData.intValue;
-    }
-    
-    if (json.get(jsonData, "duration")) {
-      simulationData.duration = jsonData.intValue;
-    }
-    
-    if (json.get(jsonData, "status")) {
-      simulationData.status = jsonData.stringValue;
-    }
-    
-    if (simulationData.active && simulationData.status == "running") {
-      Serial.print("Simulation active: ");
-      Serial.println(simulationData.type);
-    }
-  }
-}
-
-void listenToActuators() {
-  if (!firebaseReady) return;
+  unsigned long elapsed = (millis() - simulationState.startTime) / 1000;
   
-  if (Firebase.RTDB.getJSON(&fbdo, actuatorsPath.c_str())) {
-    FirebaseJson &json = fbdo.jsonObject();
-    FirebaseJsonData jsonData;
+  // Check if simulation duration has elapsed
+  if (elapsed >= simulationState.duration) {
+    Serial.println("Simulation complete - returning to normal mode");
     
-    // Parse actuator commands
-    if (json.get(jsonData, "fan")) {
-      actuatorData.fan = jsonData.boolValue;
+    // Update Firebase to end simulation
+    if (Firebase.ready() && signupOK) {
+      String path = buildPath("greenhouses/", ZONE_ID, "/simulation/status");
+      Firebase.RTDB.setString(&fbdo, path.c_str(), "complete");
+      
+      path = buildPath("greenhouses/", ZONE_ID, "/mode");
+      Firebase.RTDB.setString(&fbdo, path.c_str(), "normal");
     }
     
-    if (json.get(jsonData, "pump")) {
-      actuatorData.pump = jsonData.boolValue;
-    }
-    
-    if (json.get(jsonData, "heater")) {
-      actuatorData.heater = jsonData.boolValue;
-    }
-    
-    if (json.get(jsonData, "misting")) {
-      actuatorData.misting = jsonData.boolValue;
-    }
-    
-    if (json.get(jsonData, "lighting")) {
-      actuatorData.lighting = jsonData.boolValue;
-    }
-    
-    if (json.get(jsonData, "co2dosing")) {
-      actuatorData.co2dosing = jsonData.boolValue;
-    }
-  }
-}
-
-void controlActuators() {
-  // Control fan
-  digitalWrite(FAN_PIN, actuatorData.fan ? LOW : HIGH);
-
-  digitalWrite(Fan_Pin_2, actuatorData.fan ? LOW : HIGH);
-  
-  // Control pump
-  digitalWrite(PUMP_PIN, actuatorData.pump ? LOW : HIGH);
-  
-  // // Control heater
-  // digitalWrite(HEATER_PIN, actuatorData.heater ? HIGH : LOW);
-  
-  // // Control misting
-  // digitalWrite(MISTING_PIN, actuatorData.misting ? HIGH : LOW);
-  
-  // // Control lighting
-  // digitalWrite(LIGHTING_PIN, actuatorData.lighting ? HIGH : LOW);
-  
-  // // Control CO2 dosing
-  // digitalWrite(CO2_DOSING_PIN, actuatorData.co2dosing ? HIGH : LOW);
-  
-  // Print actuator status if any are active
-  if (actuatorData.fan || actuatorData.pump || actuatorData.heater || 
-      actuatorData.misting || actuatorData.lighting || actuatorData.co2dosing) {
-    
-    Serial.println("--- Active Actuators ---");
-    if (actuatorData.fan) Serial.println("Fan:        ON");
-    if (actuatorData.pump) Serial.println("Pump:       ON");
-    if (actuatorData.heater) Serial.println("Heater:     ON");
-    if (actuatorData.misting) Serial.println("Misting:    ON");
-    if (actuatorData.lighting) Serial.println("Lighting:   ON");
-    if (actuatorData.co2dosing) Serial.println("CO2 Dosing: ON");
-    Serial.println();
-  }
-}
-
-void handleSimulation() {
-  if (!simulationData.active || simulationData.status != "running") {
+    simulationState.active = false;
+    currentMode = NORMAL_MODE;
     return;
   }
   
-  // Check if simulation duration has elapsed
-  unsigned long elapsed = millis() - simulationData.startTime;
+  // Calculate actuator responses to simulated conditions
+  ActuatorStates simStates = calculateSimulationActuators();
   
-  if (elapsed >= simulationData.duration) {
-    // Simulation complete
-    Serial.println("Simulation completed");
+  // Update actuators if states changed
+  if (memcmp(&simStates, &currentActuators, sizeof(ActuatorStates)) != 0) {
+    currentActuators = simStates;
+    controlActuators(currentActuators);
+    updateFirebaseActuators(currentActuators, true);
+    
+    Serial.printf("Simulation actuators updated (%lu/%d sec)\n", elapsed, simulationState.duration);
+  }
+}
+
+ActuatorStates calculateSimulationActuators() {
+  ActuatorStates states;
+  
+  // Respond to simulated conditions
+  float tempDiff = simulationState.simTemp - normalParams.targetTempMax;
+  
+  // Heatwave scenario
+  if (simulationState.type == "heatwave") {
+    states.fan = true; // Cool down
+    if (simulationState.simSoilMoisture < 30) {
+      states.pump = true; // Prevent heat stress
+    }
+  }
+  
+  // Dry soil scenario
+  else if (simulationState.type == "drysoil") {
+    states.pump = true; // Irrigate immediately
+    if (simulationState.simTemp > normalParams.targetTempMax) {
+      states.fan = true; // Also cool if hot
+    }
+  }
+  
+  // Drought scenario (high temp + low soil moisture)
+  else if (simulationState.type == "drought") {
+    states.fan = true; // Cooling
+    states.pump = true; // Irrigation
+    states.misting = true; // Humidity to reduce transpiration
+  }
+  
+  // Cold snap scenario
+  else if (simulationState.type == "coldsnap") {
+    states.heater = true; // Heat up
+    states.fan = false; // Don't ventilate cold air
+  }
+  
+  // High humidity scenario
+  else if (simulationState.type == "highhumidity") {
+    states.fan = true; // Ventilate to reduce humidity
+    states.misting = false; // Stop misting
+  }
+  
+  // Low light scenario
+  else if (simulationState.type == "lowlight") {
+    states.lighting = true; // Supplemental lighting
+  }
+  
+  // CO2 deficiency scenario
+  else if (simulationState.type == "co2deficiency") {
+    states.co2dosing = true; // Add CO2
+  }
+  
+  return states;
+}
+
+void controlActuators(ActuatorStates states) {
+  digitalWrite(FAN_PIN, states.fan ? LOW : HIGH);
+  digitalWrite(PUMP_PIN, states.pump ? LOW : HIGH);
+  digitalWrite(HEATER_PIN, states.heater ? HIGH : LOW);
+  digitalWrite(MISTING_PIN, states.misting ? HIGH : LOW);
+  digitalWrite(LIGHTING_PIN, states.lighting ? HIGH : LOW);
+  digitalWrite(CO2_DOSING_PIN, states.co2dosing ? HIGH : LOW);
+  
+  Serial.printf("Actuators - Fan:%d Pump:%d Heater:%d Mist:%d Light:%d CO2:%d\n",
+                states.fan, states.pump, states.heater, 
+                states.misting, states.lighting, states.co2dosing);
+}
+
+void updateFirebaseActuators(ActuatorStates states, bool isSimulation) {
+  if (Firebase.ready() && signupOK) {
+    String path;
+    
+    if (isSimulation) {
+      path = buildPath("greenhouses/", ZONE_ID, "/simulation/actuatorStates");
+    } else {
+      path = buildPath("greenhouses/", ZONE_ID, "/normalMode/actuatorStates");
+    }
     
     FirebaseJson json;
-    json.set("active", false);
-    json.set("status", "complete");
+    json.set("fan", states.fan);
+    json.set("pump", states.pump);
+    json.set("heater", states.heater);
+    json.set("misting", states.misting);
+    json.set("lighting", states.lighting);
+    json.set("co2dosing", states.co2dosing);
     
-    Firebase.RTDB.updateNode(&fbdo, simulationPath.c_str(), &json);
-    
-    // Turn off all actuators
-    actuatorData.fan = false;
-    actuatorData.pump = false;
-    actuatorData.heater = false;
-    actuatorData.misting = false;
-    actuatorData.lighting = false;
-    actuatorData.co2dosing = false;
-    
-    FirebaseJson actuatorJson;
-    actuatorJson.set("fan", false);
-    actuatorJson.set("pump", false);
-    actuatorJson.set("heater", false);
-    actuatorJson.set("misting", false);
-    actuatorJson.set("lighting", false);
-    actuatorJson.set("co2dosing", false);
-    
-    Firebase.RTDB.updateNode(&fbdo, actuatorsPath.c_str(), &actuatorJson);
-    
-    simulationData.active = false;
-    simulationData.status = "complete";
-    
-    Serial.println("System returning to normal operation\n");
-  } else {
-    // Print remaining time every 2 seconds
-    int remaining = (simulationData.duration - elapsed) / 1000;
-    static int lastRemaining = -1;
-    
-    if (remaining != lastRemaining && remaining % 2 == 0) {
-      Serial.print("Simulation time remaining: ");
-      Serial.print(remaining);
-      Serial.println(" seconds");
-      lastRemaining = remaining;
-    }
+    Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json);
   }
 }
