@@ -18,14 +18,14 @@
 #define DHT_PIN_2 15
 #define SOIL_MOISTURE_PIN 35
 #define GAS_SENSOR_PIN 34
-#define FAN_PIN 32 //25
+#define FAN_PIN 32 
 #define Fan_Pin_2 27
-#define PUMP_PIN 16 //26
+#define PUMP_PIN 16 
 
-#define HEATER_PIN 15 //27
-#define MISTING_PIN 14
-#define LIGHTING_PIN 12
-#define CO2_DOSING_PIN 13
+// #define HEATER_PIN 15 //27
+// #define MISTING_PIN 14
+// #define LIGHTING_PIN 12
+// #define CO2_DOSING_PIN 13
 
 // Sensor configuration
 #define DHT_TYPE DHT22
@@ -38,7 +38,7 @@ FirebaseAuth auth;
 FirebaseConfig config;
 
 // Zone ID (configure per greenhouse)
-const char* zoneId = "zone1";
+const char* zoneId = "zone-1";
 
 // Firebase paths
 String sensorsPath;
@@ -106,19 +106,13 @@ void setup() {
   
   // Initialize pins
   pinMode(FAN_PIN, OUTPUT);
+  pinMode(Fan_Pin_2, OUTPUT);
   pinMode(PUMP_PIN, OUTPUT);
-  pinMode(HEATER_PIN, OUTPUT);
-  pinMode(MISTING_PIN, OUTPUT);
-  pinMode(LIGHTING_PIN, OUTPUT);
-  pinMode(CO2_DOSING_PIN, OUTPUT);
   
   // Initialize all actuators to OFF
-  digitalWrite(FAN_PIN, LOW);
-  digitalWrite(PUMP_PIN, LOW);
-  digitalWrite(HEATER_PIN, LOW);
-  digitalWrite(MISTING_PIN, LOW);
-  digitalWrite(LIGHTING_PIN, LOW);
-  digitalWrite(CO2_DOSING_PIN, LOW);
+  digitalWrite(FAN_PIN, HIGH);
+  digitalWrite(Fan_Pin_2, HIGH);
+  digitalWrite(PUMP_PIN, HIGH);
   
   Serial.println("Actuator pins initialized");
   
@@ -446,22 +440,24 @@ void listenToActuators() {
 
 void controlActuators() {
   // Control fan
-  digitalWrite(FAN_PIN, actuatorData.fan ? HIGH : LOW);
+  digitalWrite(FAN_PIN, actuatorData.fan ? LOW : HIGH);
+
+  digitalWrite(Fan_Pin_2, actuatorData.fan ? LOW : HIGH);
   
   // Control pump
-  digitalWrite(PUMP_PIN, actuatorData.pump ? HIGH : LOW);
+  digitalWrite(PUMP_PIN, actuatorData.pump ? LOW : HIGH);
   
-  // Control heater
-  digitalWrite(HEATER_PIN, actuatorData.heater ? HIGH : LOW);
+  // // Control heater
+  // digitalWrite(HEATER_PIN, actuatorData.heater ? HIGH : LOW);
   
-  // Control misting
-  digitalWrite(MISTING_PIN, actuatorData.misting ? HIGH : LOW);
+  // // Control misting
+  // digitalWrite(MISTING_PIN, actuatorData.misting ? HIGH : LOW);
   
-  // Control lighting
-  digitalWrite(LIGHTING_PIN, actuatorData.lighting ? HIGH : LOW);
+  // // Control lighting
+  // digitalWrite(LIGHTING_PIN, actuatorData.lighting ? HIGH : LOW);
   
-  // Control CO2 dosing
-  digitalWrite(CO2_DOSING_PIN, actuatorData.co2dosing ? HIGH : LOW);
+  // // Control CO2 dosing
+  // digitalWrite(CO2_DOSING_PIN, actuatorData.co2dosing ? HIGH : LOW);
   
   // Print actuator status if any are active
   if (actuatorData.fan || actuatorData.pump || actuatorData.heater || 
