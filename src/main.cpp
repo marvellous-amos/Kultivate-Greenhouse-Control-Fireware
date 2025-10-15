@@ -53,6 +53,9 @@
 #define SENSOR_READ_INTERVAL 5000    // 5 seconds
 #define FIREBASE_UPDATE_INTERVAL 10000  // 10 seconds
 #define SIMULATION_CHECK_INTERVAL 1000  // 1 second
+unsigned long lastModeChangeTime = 0;
+#define MODE_CHANGE_COOLDOWN 5000 // 5 seconds
+
 
 // Firebase objects
 FirebaseData fbdo;
@@ -370,12 +373,18 @@ void checkModeChange() {
         Serial.println("Switching to NORMAL MODE");
         currentMode = NORMAL_MODE;
         simulationState.active = false;
+        lastModeChangeTime = millis();
       }
+      
     }
   }
 }
 
 void runNormalMode() {
+  if (millis() - lastModeChangeTime < MODE_CHANGE_COOLDOWN) {
+    return; // Still in cooldown period after simulation, do nothing
+  }
+
   // Calculate actuator states based on sensor readings
   ActuatorStates newStates = calculateNormalModeActuators();
   
@@ -443,28 +452,99 @@ ActuatorStates calculateNormalModeActuators() {
   return states;
 }
 
+void resetAllActuators() {
+
+ActuatorStates offStates;
+
+offStates.fan = false;
+
+offStates.pump = false;
+
+offStates.heater = false;
+
+offStates.misting = false;
+
+offStates.lighting = false;
+
+offStates.co2dosing = false;
+
+controlActuators(offStates);
+
+updateFirebaseActuators(offStates, true); // Update simulation node
+
+updateFirebaseActuators(offStates, false); // Update normal mode node too
+
+currentActuators = offStates;
+
+}
+
 void runSimulationMode() {
   if (!simulationState.active) return;
   
   unsigned long elapsed = (millis() - simulationState.startTime) / 1000;
   
-  // Check if simulation duration has elapsed
+ // Check if simulation duration has elapsed
+
+if (elapsed >= simulationState.duration) {
+
+Serial.println("Simulation complete - returning to normal mode");
+
+
+// Update Firebase to end simulation
+
+if (Firebase.ready() && signupOK) {
+
+String path = buildPath("greenhouses/", ZONE_ID, "/simulation/status");
+
+Firebase.RTDB.setString(&fbdo, path.c_str(), "complete");
+
+
+path = buildPath("greenhouses/", ZONE_ID, "/mode");
+
+Firebase.RTDB.setString(&fbdo, path.c_str(), "normal");
+
+}
+
+
+simulationState.active = false;
+
+currentMode = NORMAL_MODE;
+
+return;
+
+}
+
   if (elapsed >= simulationState.duration) {
-    Serial.println("Simulation complete - returning to normal mode");
-    
-    // Update Firebase to end simulation
-    if (Firebase.ready() && signupOK) {
-      String path = buildPath("greenhouses/", ZONE_ID, "/simulation/status");
-      Firebase.RTDB.setString(&fbdo, path.c_str(), "complete");
-      
-      path = buildPath("greenhouses/", ZONE_ID, "/mode");
-      Firebase.RTDB.setString(&fbdo, path.c_str(), "normal");
-    }
-    
-    simulationState.active = false;
-    currentMode = NORMAL_MODE;
-    return;
+  Serial.println("Simulation complete - returning to normal mode");
+
+  // Turn off all actuators after simulation
+  ActuatorStates offStates;
+  offStates.fan = false;
+  offStates.pump = false;
+  offStates.heater = false;
+  offStates.misting = false;
+  offStates.lighting = false;
+  offStates.co2dosing = false;
+  controlActuators(offStates);
+  updateFirebaseActuators(offStates, true); // Update simulation node
+  updateFirebaseActuators(offStates, false); // Update normal mode node too
+  currentActuators = offStates;
+
+  // Update Firebase mode and simulation status
+  if (Firebase.ready() && signupOK) {
+    String path = buildPath("greenhouses/", ZONE_ID, "/simulation/status");
+    Firebase.RTDB.setString(&fbdo, path.c_str(), "complete");
+
+    path = buildPath("greenhouses/", ZONE_ID, "/mode");
+    Firebase.RTDB.setString(&fbdo, path.c_str(), "normal");
   }
+
+  simulationState.active = false;
+  currentMode = NORMAL_MODE;
+  Serial.println("Actuators reset after simulation.");
+  return;
+}
+
   
   // Calculate actuator responses to simulated conditions
   ActuatorStates simStates = calculateSimulationActuators();
