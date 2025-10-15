@@ -167,6 +167,13 @@ void setup() {
   setupFirebase();
   setupSensors();
   setupActuators();
+
+  // Wait for sensors to stabilize
+  delay(2000);
+  readSensors();
+
+  controlActuators(currentActuators);
+  updateFirebaseActuators(currentActuators, false);
   
   Serial.println("System ready!");
   digitalWrite(STATUS_LED, HIGH);
@@ -253,10 +260,10 @@ void setupActuators() {
   digitalWrite(FAN_PIN, HIGH ); // Assuming active LOW for fan
   digitalWrite(FAN_PIN_2, HIGH ); // Assuming active LOW for fan
   digitalWrite(PUMP_PIN, HIGH); // Assuming active LOW for pump
-  digitalWrite(HEATER_PIN, LOW);
-  digitalWrite(MISTING_PIN, LOW);
-  digitalWrite(LIGHTING_PIN, LOW);
-  digitalWrite(CO2_DOSING_PIN, LOW);
+  digitalWrite(HEATER_PIN, HIGH);
+  digitalWrite(MISTING_PIN, HIGH);
+  digitalWrite(LIGHTING_PIN, HIGH);
+  digitalWrite(CO2_DOSING_PIN, HIGH);
   
   Serial.println("Actuators initialized");
 }
@@ -528,11 +535,12 @@ ActuatorStates calculateSimulationActuators() {
 
 void controlActuators(ActuatorStates states) {
   digitalWrite(FAN_PIN, states.fan ? LOW : HIGH);
+  digitalWrite(FAN_PIN_2, states.fan ? LOW : HIGH);
   digitalWrite(PUMP_PIN, states.pump ? LOW : HIGH);
-  digitalWrite(HEATER_PIN, states.heater ? HIGH : LOW);
-  digitalWrite(MISTING_PIN, states.misting ? HIGH : LOW);
-  digitalWrite(LIGHTING_PIN, states.lighting ? HIGH : LOW);
-  digitalWrite(CO2_DOSING_PIN, states.co2dosing ? HIGH : LOW);
+  digitalWrite(HEATER_PIN, states.heater ? LOW : HIGH);
+  digitalWrite(MISTING_PIN, states.misting ? LOW : HIGH);
+  digitalWrite(LIGHTING_PIN, states.lighting ? LOW : HIGH);
+  digitalWrite(CO2_DOSING_PIN, states.co2dosing ? LOW : HIGH);
   
   Serial.printf("Actuators - Fan:%d Pump:%d Heater:%d Mist:%d Light:%d CO2:%d\n",
                 states.fan, states.pump, states.heater, 
